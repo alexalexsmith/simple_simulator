@@ -1,4 +1,7 @@
-"""maya node utils for handling maya nodes as scriptable objects"""
+"""
+maya node module.
+used to manage maya node names,attributes, and connections
+"""
 
 from maya import cmds
 
@@ -24,39 +27,23 @@ class MayaNode(object):
             test_shape = cmds.listRelatives(node, shapes=True)
             if test_shape:
                 shape = test_shape[0]
-        # Some non transform nodes don't have a transform node above them (Nucleus, Joints)
-        elif cmds.objectType(transform) in ["nucleus", "joint"]:
+        # Joints are very "special"
+        elif cmds.objectType(transform) == "joint":
             pass
-        # Finally we accept the passed node as a shape, and we get the transform above it
         else:
+            # Some non transform nodes don't have a transform node above them (Nucleus),
+            # I will handle those as a transform for simplicity
             test_transform = cmds.listRelatives(node, parent=True, fullPath=True)
             if test_transform:
                 shape = node
                 transform = test_transform[0]
         self.long_name = transform
         if ":" in self.long_name.split("|")[-1]:
-            self.namespace = self.long_name.split("|")[-1].split(":")[0]
-            self.short_name = self.long_name.split("|")[-1].split(":")[1]
+            self.namespace = self.long_name.split("|")[-1].rsplit(":", 1)[0]
+            self.short_name = self.long_name.split("|")[-1].rsplit(":", 1)[1]
         else:
             self.short_name = self.long_name.split("|")[-1]
         self.shape = shape
-
-    def add_message_attribute(self, name):
-        """add a message attribute to connect nodes to. This is used to store a relationship between nodes
-        :param str name: name of new attribute
-        :return str: full path of new attribute"""
-        cmds.addAttr(self.long_name, keyable=False, attributeType="message", longName=name)
-        return self.get_attribute(name)  # hopefully this will return the attribute
-
-    def add_string_attribute(self, name, value):
-        """add a string attribute with a value. This is used to tag nodes and hold constant name data
-        :param str name: name of new attribute
-        :param str value: value of new attribute
-        :return str: full path of new attribute"""
-        cmds.addAttr(self.long_name, keyable=False, dataType="string", longName=name)
-        string_attribute = self.get_attribute(name)
-        cmds.setAttr(string_attribute, value, type="string")
-        return string_attribute
 
     def select(self):
         """select the node in viewport"""
@@ -68,16 +55,32 @@ class MayaNode(object):
             if cmds.objExists(self.long_name):
                 cmds.delete(self.long_name)
 
-    def get_attribute(self, attribute, shape=False):
+    def init_attributes(self):
+        """
+        init attributes, function is triggered when set_parent function is used to make sure stored attribute names
+        remain accurate
+        """
+        return None
+
+    def get_attribute(self, attribute, shape=False, next_index=False, index_range=100):
         """get the full path of the attribute. useful when setting and connection attributes
         :param str attribute: name of attribute
         :param bool shape: whether attribute belongs to shape
+        :param bool next_index: if true will return the next available indexed plug
+        :param int index_range: max range to check for indexed attribute plugs
         :return str: full path of attribute"""
-        # TODO: if attribute is multiindex I can grab the next available index value
         node_name = self.long_name
         if shape:
             node_name = self.shape
-        return "{0}.{1}".format(node_name, attribute)
+        attribute = f"{node_name}.{attribute}"
+        if next_index:
+            for i in range(index_range):
+                connected = cmds.connectionInfo(f"{attribute}[{i}]", sourceFromDestination=True)
+                if not connected:
+                    attribute = f"{attribute}[{i}]"
+                    break
+
+        return attribute
 
     def set_parent(self, maya_node):
         """set the parent of this MayaNode
@@ -85,6 +88,7 @@ class MayaNode(object):
         new_name = cmds.parent(self.long_name, maya_node.long_name)
         #  update the long name to match the new path name
         self.long_name = cmds.ls(new_name, long=True)[0]
+        self.init_attributes()
         return self
 
     def set_name(self, name):
@@ -99,7 +103,7 @@ class MayaNode(object):
         cmds.setAttr("{0}.visibility".format(self.long_name), option)
 
     def set_translation(self, translation):
-        """set the translation of this node in world space
+        """set the translation of this node
         :param tuple(float, float, float) translation: translation position to set"""
         cmds.xform(self.long_name, translation=translation, worldSpace=True)
         return
@@ -114,6 +118,7 @@ class MayaNode(object):
 
 class MayaNodes(object):
     """list of MayaNode's object"""
+
     def __init__(self, nodes=None, *args, **kwargs):
         """:param list[MayaNode] nodes: list of MayaNode object"""
         self.nodes = nodes
@@ -171,22 +176,38 @@ class Curve(MayaNode):
 
     def __init__(self, *args, **kwargs):
         super(Curve, self).__init__(*args, **kwargs)
-        # TODO: Remove these hard codes and use the get_attribute method from inherited class
-        self.local = "{0}.local".format(self.shape)
-        self.create = "{0}.create".format(self.shape)
-        self.world_matrix = ".worldMatrix[0]".format(self.long_name)
+        self.local = None
+        self.create = None
+        self.world_matrix = None
+        self.world_space = None
+
+        self.init_attributes()
+
+    def init_attributes(self):
+        """
+        init important attributes
+        """
+        self.local = self.get_attribute("local", shape=True)
+        self.create = self.get_attribute("create", shape=True)
+        self.world_matrix = self.get_attribute("worldMatrix", next_index=True, index_range=100)
+        self.world_space = self.get_attribute("worldSpace", next_index=True, index_range=100)
 
     def get_curve_vectors(self):
         """init the curve vectors"""
         curve_vectors = cmds.ls('{0}.cv[:]'.format(self.short_name), flatten=True)
         return curve_vectors
 
-    def attach_follicle(self, follicle):
-        """attach curve to follicle. WARNING this is only for empty curve nodes
-        :param Follicle follicle: node to connect"""
-        cmds.connectAttr(
-            follicle.get_attribute("outCurve", shape=True),
-            self.get_attribute("create", shape=True))
+    def uv_pin(self, maya_node, u_position):
+        """uv pin a node to this curve
+        :param MayaNode maya_node: node to attach
+        :param float u_position: position to set connection to"""
+        uv_pin = MayaNode(node=cmds.createNode("uvPin", name=f"{maya_node.short_name}_uvPin"))
+        cmds.connectAttr(self.world_space, uv_pin.get_attribute("deformedGeometry"))
+        cmds.connectAttr(self.get_attribute("local", shape=True), uv_pin.get_attribute("originalGeometry"))
+        cmds.setAttr(uv_pin.get_attribute("normalizedIsoParms"), 0)
+        cmds.setAttr(uv_pin.get_attribute("coordinate", next_index=True), u_position, 0)
+        cmds.connectAttr(uv_pin.get_attribute("outputMatrix", next_index=True),
+                         maya_node.get_attribute("offsetParentMatrix"))
 
 
 class NHair(MayaNode):
@@ -194,44 +215,37 @@ class NHair(MayaNode):
 
     def __init__(self, *args, **kwargs):
         super(NHair, self).__init__(*args, **kwargs)
-        self.current_state = "{0}.currentState".format(self.shape)
-        self.start_state = "{0}.startState".format(self.shape)
-        self.next_state = "{0}.nextState".format(self.shape)
-        self.start_frame = "{0}.startFrame".format(self.shape)
-        # TODO: Remove these hard codes and use the get_attribute method from inherited class
-        self.output_hair = "{0}.outputHair[0]".format(self.shape)
-        self.input_hair = "{0}.inputHair[0]".format(self.shape)
-        self.nucleus_id = "{0}.nucleusId".format(self.shape)
+        self.current_state = None
+        self.start_state = None
+        self.next_state = None
+        self.start_frame = None
+        self.output_hair = None
+        self.input_hair = None
+        self.nucleus_id = None
 
+        self.init_attributes()
         self._set_up_nhair()
+
+    def init_attributes(self):
+        self.current_state = self.get_attribute("currentState", shape=True)
+        self.start_state = self.get_attribute("startState", shape=True)
+        self.next_state = self.get_attribute("nextState", shape=True)
+        self.start_frame = self.get_attribute("startFrame", shape=True)
+        self.output_hair = self.get_attribute("outputHair", shape=True, next_index=True, index_range=100)
+        self.input_hair = self.get_attribute("inputHair", shape=True, next_index=True, index_range=100)
+        self.nucleus_id = self.get_attribute("nucleusId", shape=True)
 
     def _set_up_nhair(self):
         """basic nhair setup"""
         # do some break instances thing
         cmds.removeMultiInstance("{0}.stiffnessScale[1]".format(self.shape), b=True)
         # set basic attributes of the nhair
-        cmds.setAttr("{0}.clumpWidth".format(self.shape), 0.00001)
-        cmds.setAttr("{0}.hairsPerClump".format(self.shape), 1)
+        cmds.setAttr(self.get_attribute("clumpWidth", shape=True), 0.00001)
+        cmds.setAttr(self.get_attribute("hairsPerClump", shape=True), 1)
         # connect time node to nhair
-        cmds.connectAttr("time1.outTime", "{0}.currentTime".format(self.shape))
+        cmds.connectAttr("time1.outTime", self.get_attribute("currentTime", shape=True))
         # set nhair active
-        cmds.setAttr("{0}.active".format(self.shape), 1)
-
-    def connect_to_nucleus(self, nucleus):
-        """connect nhair to nucleus
-        :param Nucleus nucleus: nucleus to connect"""
-        cmds.connectAttr(
-            self.get_attribute("currentState", shape=True),
-            nucleus.get_attribute("inputActive[0]"))
-        cmds.connectAttr(
-            self.get_attribute("startState", shape=True),
-            nucleus.get_attribute("inputActiveStart[0]"))
-        cmds.connectAttr(
-            nucleus.get_attribute("outputObjects[0]"),
-            self.get_attribute("nextState", shape=True))
-        cmds.connectAttr(
-            nucleus.get_attribute("startFrame"),
-            self.get_attribute("startFrame", shape=True))
+        cmds.setAttr(self.get_attribute("active", shape=True), 1)
 
 
 class Nucleus(MayaNode):
@@ -239,24 +253,56 @@ class Nucleus(MayaNode):
 
     def __init__(self, *args, **kwargs):
         super(Nucleus, self).__init__(*args, **kwargs)
-        # TODO: Remove these hard codes and use the get_attribute method from inherited class
-        # This works but is sketchy
-        self.inputActive = "{0}.inputActive[0]".format(self.long_name)
-        self.inputActiveStart = "{0}.inputActiveStart[0]".format(self.long_name)
-        self.outputObjects = "{0}.outputObjects[0]".format(self.long_name)
-        self.startFrame = "{0}.startFrame".format(self.long_name)
-        self.input_start = "{0}.inputStart[0]".format(self.long_name)
-        self.input_current = "{0}.inputCurrent[0]".format(self.long_name)
+        self.inputActive = None
+        self.inputActiveStart = None
+        self.outputObjects = None
+        self.startFrame = None
+        self.input_start = None
+        self.input_current = None
 
+        self.init_attributes()
         self._set_up_nucleus()
+
+    def init_attributes(self):
+        self.inputActive = self.get_attribute("inputActive", next_index=True, index_range=100)
+        self.inputActiveStart = self.get_attribute("inputActiveStart", next_index=True, index_range=100)
+        self.outputObjects = self.get_attribute("outputObjects", next_index=True, index_range=100)
+        self.startFrame = self.get_attribute("startFrame")
+        self.input_start = self.get_attribute("inputStart", next_index=True, index_range=100)
+        self.input_current = self.get_attribute("inputCurrent", next_index=True, index_range=100)
 
     def _set_up_nucleus(self):
         """basic nucleus setup"""
-        cmds.connectAttr("time1.outTime", "{0}.currentTime".format(self.long_name))
+        cmds.connectAttr("time1.outTime", self.get_attribute("currentTime"))
 
     def force_dynamics(self):
         """force dynamics on the current frame"""
-        cmds.getAttr("{0}.forceDynamics".format(self.long_name))
+        cmds.getAttr(self.get_attribute("forceDynamics"))
+
+    def add_colliders(self, maya_node_list):
+        """
+        add collider objects to nucleus
+        :param list[maya_node]: list of maya nodes
+        """
+        for maya_node in maya_node_list:
+            n_rigid_node = MayaNode(node=cmds.createNode("nRigid"))
+            cmds.connectAttr(
+                "time1.outTime",
+                n_rigid_node.get_attribute("currentTime"))
+            cmds.connectAttr(
+                maya_node.get_attribute("worldMesh", shape=True),
+                n_rigid_node.get_attribute("inputMesh"))
+            cmds.connectAttr(
+                self.startFrame,
+                n_rigid_node.get_attribute("startFrame"))
+            cmds.connectAttr(
+                n_rigid_node.get_attribute("currentState"),
+                self.get_attribute("inputPassive", next_index=True))
+            cmds.connectAttr(
+                n_rigid_node.get_attribute("startState"),
+                self.get_attribute("inputPassiveStart", next_index=True))
+
+            cmds.setAttr(maya_node.get_attribute("quadSplit", shape=True), 0)
 
 
 class Follicle(MayaNode):
@@ -264,41 +310,28 @@ class Follicle(MayaNode):
 
     def __init__(self, *args, **kwargs):
         super(Follicle, self).__init__(*args, **kwargs)
-        self.start_position = "{0}.startPosition".format(self.shape)
-        self.start_position_matrix = "{0}.startPositionMatrix".format(self.shape)
-        self.current_position = "{0}.currentPosition".format(self.shape)
-        self.out_curve = "{0}.outCurve".format(self.shape)
-        self.out_hair = "{0}.outHair".format(self.shape)
+        self.start_position = None
+        self.start_position_matrix = None
+        self.current_position = None
+        self.out_curve = None
+        self.out_hair = None
 
+        self.init_attributes()
         self._set_up_follicle()
+
+    def init_attributes(self):
+        self.start_position = self.get_attribute("startPosition", shape=True)
+        self.start_position_matrix = self.get_attribute("startPositionMatrix", shape=True)
+        self.current_position = self.get_attribute("currentPosition", shape=True)
+        self.out_curve = self.get_attribute("outCurve", shape=True)
+        self.out_hair = self.get_attribute("outHair", shape=True)
 
     def _set_up_follicle(self):
         """basic follicle setup"""
-        cmds.setAttr("{0}.pointLock".format(self.shape), 0)
-        cmds.setAttr("{0}.degree".format(self.shape), 1)
-        cmds.setAttr("{0}.startDirection".format(self.shape), 1)
-        cmds.setAttr("{0}.simulationMethod".format(self.shape), 2)
-
-    def connect_to_curve(self, curve):
-        """connect to curve
-        :param Curve curve: object to connect"""
-        cmds.connectAttr(
-            curve.get_attribute("local", shape=True),
-            self.get_attribute("startPosition", shape=True))
-        cmds.connectAttr(
-            curve.get_attribute("worldMatrix[0]", shape=True),
-            self.get_attribute("startPositionMatrix", shape=True),
-            f=True)
-
-    def connect_nhair(self, nhair):
-        """connect nhair
-        :param NHair nhair: nhair to connect"""
-        cmds.connectAttr(
-            nhair.get_attribute("outputHair[0]", shape=True),
-            self.get_attribute("currentPosition", shape=True))
-        cmds.connectAttr(
-            self.get_attribute("outHair", shape=True),
-            nhair.get_attribute("inputHair[0]", shape=True))
+        cmds.setAttr(self.get_attribute("pointLock", shape=True), 0)
+        cmds.setAttr(self.get_attribute("degree", shape=True), 1)
+        cmds.setAttr(self.get_attribute("startDirection", shape=True), 1)
+        cmds.setAttr(self.get_attribute("simulationMethod", shape=True), 2)
 
 
 class SimulationController(MayaNode):
@@ -307,12 +340,13 @@ class SimulationController(MayaNode):
     def __init__(self, *args, **kwargs):
         super(SimulationController, self).__init__(*args, **kwargs)
         self._set_up_simulation_controller()
+        self.dynamic_constraint_attributes = []
 
     def _set_up_simulation_controller(self):
         """basic setup"""
         hide_attributes = ["tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz"]
         for attribute in hide_attributes:
-            cmds.setAttr("{0}.{1}".format(self.long_name, attribute), keyable=False, channelBox=False)
+            cmds.setAttr(self.get_attribute(attribute), keyable=False, channelBox=False)
 
     def add_spacer_attribute(self, title):
         """add a spacer attribute
@@ -327,7 +361,7 @@ class SimulationController(MayaNode):
             niceName="##########",
             enumName=title
         )
-        cmds.setAttr("{0}.{1}".format(self.long_name, attribute_name), channelBox=True)
+        cmds.setAttr(self.get_attribute(attribute_name), channelBox=True)
 
     def add_double_attribute(self, name, default_value):
         """add a double attribute that is visible in the attribute editor
@@ -352,11 +386,21 @@ class SimulationController(MayaNode):
             self.add_double_attribute(attribute, attributes[attribute])
             cmds.connectAttr(self.get_attribute(attribute), nucleus.get_attribute(attribute))
 
+    def attach_ik_handle(self, ik_handle):
+        """attach an ik handle node to the simulation controller
+        :param MayaNode ik_handle: ik handle to connect"""
+        self.add_spacer_attribute("IK_Handle")
+        ik_handle_attributes = {"roll": 0, "twist": 0}
+        for attribute in ik_handle_attributes:
+            self.add_double_attribute(attribute, ik_handle_attributes[attribute])
+            cmds.connectAttr(self.get_attribute(attribute), ik_handle.get_attribute(attribute, shape=False))
+
     def attach_nhair(self, nhair):
         """attach nhair to the simulation controller
         :param NHair nhair: NHair to connect"""
         self.add_spacer_attribute("NHAIR")
-        nhair_attributes = {"bounce": 0, "damp": 0, "drag": 0.05, "friction": 0.5,
+        # TODO: selfCollide needs to ba a bool not a double
+        nhair_attributes = {"selfCollide": 1, "bounce": 0, "damp": 0, "drag": 0.05, "friction": 0.5,
                             "stickiness": 0, "stiffness": 0, "stretchResistance": 10,
                             "compressionResistance": 10, "collideWidthOffset": 0}
         for attribute in nhair_attributes:
@@ -365,10 +409,13 @@ class SimulationController(MayaNode):
 
     def attach_dynamic_constraint(self, dynamic_constraint):
         """attach constraint node to sim controller. Add attribute for user control
-        :param DynamicConstraint dynamic_constraint: DynamicConstraint to connect"""
+        :param DynamicConstraint dynamic_constraint: DynamicConstraint to connect
+        :return str: name of attribute created"""
         attribute = "{0}Strength".format(dynamic_constraint.short_name)
         self.add_double_attribute(attribute, 20)
         cmds.connectAttr(self.get_attribute(attribute), dynamic_constraint.get_attribute("strength", shape=True))
+        self.dynamic_constraint_attributes.append(attribute)
+        return attribute
 
 
 class DynamicConstraint(MayaNode):
@@ -376,15 +423,22 @@ class DynamicConstraint(MayaNode):
 
     def __init__(self, *args, **kwargs):
         super(DynamicConstraint, self).__init__(*args, **kwargs)
-        self.strength = "{0}.strength".format(self.shape)
-        self.component_ids = "{0}.componentIds".format(self.shape)
-        self.eval_start = "{0}.evalStart[0]".format(self.shape)
-        self.eval_current = "{0}.evalCurrent[0]".format(self.shape)
+        self.strength = None
+        self.component_ids = None
+        self.eval_start = None
+        self.eval_current = None
 
-        #self._set_up_constraint()
-    # NOTE: this is here in case I want to create the dynamic transform constraints myself later
+        self.init_attributes()
+        # self._set_up_constraint()
+
+    def init_attributes(self):
+        self.strength = self.get_attribute("strength", shape=True)
+        self.component_ids = self.get_attribute("componentIds", shape=True)
+        self.eval_start = self.get_attribute("evalStart", shape=True, next_index=True, index_range=100)
+        self.eval_current = self.get_attribute("evalCurrent", shape=True, next_index=True, index_range=100)
+
     def _set_up_constraint(self):
         """basic dynamic constraint setup"""
-        cmds.setAttr("{0}.constraintRelation".format(self.shape), 0)
-        cmds.setAttr("{0}.componentRelation".format(self.shape), 0)
-        cmds.connectAttr("time1.outTime", "{0}.currentTime".format(self.shape))
+        cmds.setAttr(self.get_attribute("constraintRelation", shape=True), 0)
+        cmds.setAttr(self.get_attribute("componentRelation", shape=True), 0)
+        cmds.connectAttr("time1.outTime", self.get_attribute("currentTime", shape=True))
