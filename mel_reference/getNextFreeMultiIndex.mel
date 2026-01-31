@@ -1,0 +1,47 @@
+// ===========================================================================
+// Copyright 2022 Autodesk, Inc. All rights reserved.
+//
+// Use of this software is subject to the terms of the Autodesk license
+// agreement provided at the time of installation or download, or which
+// otherwise accompanies this software in either electronic or hard copy form.
+// ===========================================================================
+
+//<doc>
+//<name getNextFreeMultiIndex>
+//<owner "Autodesk">
+//
+//<synopsis>
+//		getNextFreeMultiIndex
+//
+//<returns>
+//		None.	
+//
+//<description>
+//				This returns the next multi index that's available
+//              for the given destination attribute. This command is useful when
+//				connecting nodes where one wishes to connect to the first available multi
+//				on a node, i.e. the first element that is not already connected.
+//
+//<flags>
+//	string $attr	the name of the multi attribute to get the free index for
+//	int $start		the first index to check from ( use zero if last index is not known )
+//
+//<examples>
+//  createNode nucleus;
+//  int $index = getNextFreeMultiIndex( "nucleus1.inputActiveStart", 0 );
+//</doc>
+
+global proc int getNextFreeMultiIndex( string $attr, int $start )
+{
+	// We find the next unconnected multi index starting at
+	// the passed in index.
+	int $i;
+	// assume a max of 10 million connections
+	for( $i = $start; $i < 10000000; $i++ ){
+		string $con = `connectionInfo -sfd ($attr + "["+$i+"]")`;
+		if( size( $con ) == 0){
+			return( $i );
+		}
+	}
+	return(0);
+}
